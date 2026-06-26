@@ -1,0 +1,9 @@
+.venv/
+dist/
+build/
+bin/
+__pycache__/
+*.pyc
+*.spec.bak
+assets/icon.iconset/
+.DS_Store

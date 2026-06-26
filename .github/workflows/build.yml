@@ -1,0 +1,106 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: macOS (dmg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Prepare icons
+        run: python scripts/prepare_icons.py
+
+      - name: Download ffmpeg
+        run: python scripts/download_ffmpeg.py
+
+      - name: Build app
+        run: pyinstaller --clean --noconfirm VideoDownload.spec
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "VideoDownload" \
+            -srcfolder dist/VideoDownload.app \
+            -ov -format UDZO dist/VideoDownload.dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoDownload-macOS
+          path: |
+            dist/VideoDownload.dmg
+            dist/VideoDownload.app
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows (exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Prepare icons
+        run: python scripts/prepare_icons.py
+
+      - name: Download ffmpeg
+        run: python scripts/download_ffmpeg.py
+
+      - name: Build exe
+        run: pyinstaller --clean --noconfirm VideoDownload.spec
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoDownload-Windows
+          path: dist/VideoDownload.exe
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: VideoDownload-macOS
+          path: release/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: VideoDownload-Windows
+          path: release/windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/macos/VideoDownload.dmg
+            release/windows/VideoDownload.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
