@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成多平台应用图标 (ico / icns)。"""
+"""Generate app icons (ico / icns)."""
 
 import platform
 from pathlib import Path
@@ -13,17 +13,16 @@ PNG = ASSETS / "icon.png"
 def main() -> None:
     ASSETS.mkdir(exist_ok=True)
     if not PNG.exists():
-        raise SystemExit(f"缺少图标源文件: {PNG}")
+        raise SystemExit(f"Missing icon source: {PNG}")
 
     img = Image.open(PNG).convert("RGBA")
     sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     img.save(ASSETS / "icon.ico", format="ICO", sizes=sizes)
-    print(f"已生成 {ASSETS / 'icon.ico'}")
+    print(f"Generated {ASSETS / 'icon.ico'}")
 
     if platform.system() != "Darwin":
         return
 
-    # macOS icns 通过 iconset 目录生成（需符合 Apple 命名规范）
     iconset = ASSETS / "icon.iconset"
     if iconset.exists():
         import shutil
@@ -52,9 +51,8 @@ def main() -> None:
         ["iconutil", "-c", "icns", str(iconset), "-o", str(ASSETS / "icon.icns")],
         check=True,
     )
-    print(f"已生成 {ASSETS / 'icon.icns'}")
+    print(f"Generated {ASSETS / 'icon.icns'}")
 
-    # 清理 iconset
     for f in iconset.iterdir():
         f.unlink()
     iconset.rmdir()

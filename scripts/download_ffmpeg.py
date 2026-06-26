@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载 ffmpeg 静态构建，供打包时内置到应用中。"""
+"""Download static ffmpeg builds for bundling into the app."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ EVERMEET_MAC_URL = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
 
 
 def _download(url: str, dest: Path) -> None:
-    print(f"下载: {url}")
+    print(f"Downloading: {url}")
     with urllib.request.urlopen(url, timeout=120) as resp:
         dest.write_bytes(resp.read())
 
@@ -36,7 +36,7 @@ def _extract_ffmpeg_from_zip(zip_path: Path, target: Path) -> None:
         if not names:
             names = [n for n in zf.namelist() if Path(n).name in {"ffmpeg", "ffmpeg.exe"}]
         if not names:
-            raise RuntimeError(f"在压缩包中未找到 ffmpeg: {zip_path}")
+            raise RuntimeError(f"ffmpeg not found in archive: {zip_path}")
 
         member = sorted(names, key=len)[0]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +58,7 @@ def download_macos(target: Path) -> None:
                 _extract_ffmpeg_from_zip(zip_path, target)
                 return
             except Exception as exc:  # noqa: BLE001
-                print(f"BtbN arm64 下载失败，尝试 evermeet: {exc}")
+                print(f"BtbN arm64 failed, trying evermeet: {exc}")
                 zip_path.unlink(missing_ok=True)
 
         _download(EVERMEET_MAC_URL, zip_path)
@@ -87,15 +87,15 @@ def main() -> None:
     elif system == "Windows":
         target = BIN_DIR / "ffmpeg.exe"
     else:
-        print(f"当前平台 {system} 请手动将 ffmpeg 放到 {BIN_DIR}/")
+        print(f"Unsupported platform {system}, place ffmpeg manually in {BIN_DIR}/")
         sys.exit(1)
 
     if target.is_file():
-        print(f"已存在: {target}")
+        print(f"Already exists: {target}")
         return
 
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"==> 下载 ffmpeg 到 {target}")
+    print(f"==> Downloading ffmpeg to {target}")
 
     if system == "Darwin":
         download_macos(target)
@@ -103,10 +103,10 @@ def main() -> None:
         download_windows(target)
 
     if not target.is_file():
-        raise SystemExit("ffmpeg 下载失败")
+        raise SystemExit("Failed to download ffmpeg")
 
     size_mb = target.stat().st_size / (1024 * 1024)
-    print(f"完成: {target} ({size_mb:.1f} MB)")
+    print(f"Done: {target} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
