@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import bootstrap
+
+bootstrap.apply_ytdlp_override()
+
 import os
 import queue
 import re
@@ -14,8 +18,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from updater import (
+    UpdateResult,
+    UpdateWorker,
+    VersionInfo,
+    apply_pending_restart,
+    format_update_summary,
+    is_frozen,
+)
+from version import APP_VERSION
+
 import yt_dlp
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -43,6 +57,18 @@ YDL_BASE_OPTS = {
     "no_warnings": True,
     "noplaylist": True,
     "extractor_args": {"youtube": {"player_client": ["default", "-android_sdkless"]}},
+}
+
+# 部分站点需要额外请求头，否则会触发反爬（如 B 站 412）
+SITE_HEADERS: dict[str, dict[str, str]] = {
+    "bilibili.com": {
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    },
+    "b23.tv": {
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    },
 }
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -138,13 +164,54 @@ def has_ffmpeg() -> bool:
 
 
 def format_needs_merge(format_selector: str) -> bool:
-    return "+" in format_selector or format_selector.startswith("bv")
+    return "+" in format_selector or format_selector.startswith(("bv", "bestvideo"))
+
+
+def build_ydl_opts(url: str, **extra) -> dict:
+    """按站点补充 yt-dlp 参数（请求头等）。"""
+    opts = {**YDL_BASE_OPTS, **extra}
+    headers = dict(opts.get("http_headers") or {})
+    for domain, site_headers in SITE_HEADERS.items():
+        if domain in url:
+            headers.update(site_headers)
+            break
+    if headers:
+        opts["http_headers"] = headers
+    return opts
+
+
+def format_selector_for_fmt(fmt: dict, *, allow_merge: bool) -> str:
+    fmt_id = str(fmt["format_id"])
+    if fmt.get("acodec") not in (None, "none"):
+        return fmt_id
+    if allow_merge:
+        return f"{fmt_id}+bestaudio/best"
+    return fmt_id
+
+
+def pick_best_video_at_height(formats: list[dict], height: int) -> dict | None:
+    same_height = [
+        f
+        for f in formats
+        if f.get("height") == height and f.get("vcodec") not in (None, "none")
+    ]
+    if same_height:
+        return max(same_height, key=lambda f: f.get("tbr") or 0)
+
+    lower = [
+        f
+        for f in formats
+        if (f.get("height") or 0) <= height and f.get("vcodec") not in (None, "none")
+    ]
+    if lower:
+        return max(lower, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0))
+    return None
 
 
 def height_format_selector(height: int, *, allow_merge: bool) -> str:
     if allow_merge:
-        return f"bestvideo[height={height}]+bestaudio/best"
-    return f"best[height={height}][ext=mp4]/best[height={height}]"
+        return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
+    return f"best[height<={height}][ext=mp4]/best[height<={height}]"
 
 
 def quality_label(height: int) -> str:
@@ -176,7 +243,7 @@ def pick_default_quality_index(options: list[FormatOption]) -> int:
 def parse_formats(info: dict, *, allow_merge: bool) -> list[FormatOption]:
     options: list[FormatOption] = [
         FormatOption(
-            format_selector="bv*+ba/b" if allow_merge else "best[ext=mp4]/best",
+            format_selector="bestvideo+bestaudio/best" if allow_merge else "best[ext=mp4]/best",
             quality="最佳",
         )
     ]
@@ -193,10 +260,19 @@ def parse_formats(info: dict, *, allow_merge: bool) -> list[FormatOption]:
         ]
 
     heights = sorted({int(f["height"]) for f in video_formats}, reverse=True)
+    seen_selectors: set[str] = set()
     for height in heights:
+        best_fmt = pick_best_video_at_height(video_formats, height)
+        if best_fmt is not None:
+            selector = format_selector_for_fmt(best_fmt, allow_merge=allow_merge)
+        else:
+            selector = height_format_selector(height, allow_merge=allow_merge)
+        if selector in seen_selectors:
+            continue
+        seen_selectors.add(selector)
         options.append(
             FormatOption(
-                format_selector=height_format_selector(height, allow_merge=allow_merge),
+                format_selector=selector,
                 quality=quality_label(height),
             )
         )
@@ -234,7 +310,7 @@ class FormatFetcher:
 
     def _run(self, url: str) -> None:
         try:
-            with yt_dlp.YoutubeDL(YDL_BASE_OPTS) as ydl:
+            with yt_dlp.YoutubeDL(build_ydl_opts(url)) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not info:
                 self._on_done(FormatFetchResult(ok=False, url=url, error="无法解析视频信息"))
@@ -328,7 +404,7 @@ class DownloadManager:
                 self._notify(t)
 
         ydl_opts: dict = {
-            **YDL_BASE_OPTS,
+            **build_ydl_opts(url),
             "format": format_selector,
             "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
             "progress_hooks": [progress_hook],
@@ -359,6 +435,12 @@ class DownloadManager:
                 task.status = "失败"
                 task.error = str(exc)
                 self._notify(task)
+
+
+class UpdateBridge(QObject):
+    check_done = pyqtSignal(object, str)
+    update_done = pyqtSignal(object)
+    progress = pyqtSignal(str, object)
 
 
 class MainWindow(QMainWindow):
@@ -397,15 +479,31 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._refresh_table_layout)
 
         if self._allow_merge:
-            self.status_bar.showMessage("就绪 — 粘贴链接后点击解析")
+            mode = "开发模式" if not is_frozen() else "就绪"
+            self.status_bar.showMessage(
+                f"{mode} — 粘贴链接后点击解析 | v{APP_VERSION}"
+            )
         else:
             self.status_bar.showMessage(
-                "未检测到 ffmpeg，仅显示单文件清晰度。安装: brew install ffmpeg"
+                f"未检测到 ffmpeg，仅显示单文件清晰度 | v{APP_VERSION}"
             )
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_updates)
         self._timer.start(200)
+
+        self._update_bridge = UpdateBridge()
+        self._update_bridge.check_done.connect(self._on_check_done)
+        self._update_bridge.update_done.connect(self._on_update_done)
+        self._update_bridge.progress.connect(self._on_update_progress)
+        self._update_worker = UpdateWorker(
+            on_check_done=lambda info, err: self._update_bridge.check_done.emit(info, err),
+            on_update_done=lambda result: self._update_bridge.update_done.emit(result),
+            on_progress=lambda label, pct: self._update_bridge.progress.emit(label, pct),
+        )
+        self._pending_update_info = None
+        self._pending_restart_result: UpdateResult | None = None
+        self._updating = False
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -428,6 +526,12 @@ class MainWindow(QMainWindow):
         self.parse_btn.setMinimumWidth(80)
         self.parse_btn.clicked.connect(self._on_parse)
         url_row.addWidget(self.parse_btn)
+
+        self.update_btn = QPushButton("检查更新")
+        self.update_btn.setMinimumHeight(36)
+        self.update_btn.setMinimumWidth(96)
+        self.update_btn.clicked.connect(self._on_check_update)
+        url_row.addWidget(self.update_btn)
         layout.addLayout(url_row)
 
         layout.addWidget(QLabel("下载列表:"))
@@ -653,6 +757,137 @@ class MainWindow(QMainWindow):
         if len(text) <= max_len:
             return text
         return text[: max_len - 3] + "..."
+
+    def _on_check_update(self) -> None:
+        if self._updating:
+            return
+        self.update_btn.setEnabled(False)
+        self.status_bar.showMessage("正在检查更新...")
+        self._update_worker.check_async()
+
+    def _on_check_done(self, info: VersionInfo | None, error: str) -> None:
+        self.update_btn.setEnabled(True)
+        if error:
+            self.status_bar.showMessage(f"检查更新失败: {error[:120]}")
+            QMessageBox.warning(self, "检查更新", f"无法检查更新：\n{error}")
+            return
+        if info is None:
+            return
+
+        summary = format_update_summary(info)
+        if not info.any_update_available:
+            self.status_bar.showMessage(f"已是最新版本 | v{APP_VERSION}")
+            QMessageBox.information(self, "检查更新", summary)
+            return
+
+        if not is_frozen():
+            if info.app_update_available:
+                self.status_bar.showMessage("开发模式请下载 Release 安装包更新应用")
+                QMessageBox.information(
+                    self,
+                    "检查更新",
+                    summary
+                    + "\n\n当前为开发模式，应用本体请下载 Release 安装包；"
+                    "yt-dlp 可在此直接更新，完成后需重启。",
+                )
+            if info.ytdlp_update_available:
+                answer = QMessageBox.question(
+                    self,
+                    "更新 yt-dlp",
+                    summary + "\n\n是否下载最新 yt-dlp？\n更新后需要重启应用才能生效。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    self._pending_update_info = VersionInfo(
+                        app_current=info.app_current,
+                        app_latest=info.app_latest,
+                        ytdlp_current=info.ytdlp_current,
+                        ytdlp_latest=info.ytdlp_latest,
+                        app_update_available=False,
+                        ytdlp_update_available=True,
+                    )
+                    self._start_update()
+            elif not info.app_update_available:
+                self.status_bar.showMessage(f"已是最新版本 | v{APP_VERSION}")
+                QMessageBox.information(self, "检查更新", summary)
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "发现更新",
+            summary + "\n\n是否立即更新？\n更新完成后需要重启应用才能生效。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.status_bar.showMessage(f"已取消更新 | v{APP_VERSION}")
+            return
+
+        self._pending_update_info = info
+        self._start_update()
+
+    def _start_update(self) -> None:
+        if self._pending_update_info is None:
+            return
+        self._updating = True
+        self.update_btn.setEnabled(False)
+        self.parse_btn.setEnabled(False)
+        self.status_bar.showMessage("正在下载更新...")
+        self._update_worker.update_async(self._pending_update_info)
+
+    def _on_update_progress(self, label: str, percent: float | None) -> None:
+        if percent is None:
+            self.status_bar.showMessage(label)
+        else:
+            self.status_bar.showMessage(f"{label} {percent:.1f}%")
+
+    def _on_update_done(self, result: UpdateResult) -> None:
+        self._updating = False
+        self.update_btn.setEnabled(True)
+        self.parse_btn.setEnabled(True)
+
+        if not result.ok:
+            self.status_bar.showMessage(f"更新失败: {result.message[:120]}")
+            QMessageBox.warning(self, "更新失败", result.message)
+            return
+
+        if not result.needs_restart:
+            self.status_bar.showMessage(result.message)
+            if result.message != "当前已是最新版本":
+                QMessageBox.information(self, "检查更新", result.message)
+            return
+
+        self._pending_restart_result = result
+        self.status_bar.showMessage(result.message)
+        answer = QMessageBox.question(
+            self,
+            "需要重启",
+            result.message + "\n\n是否立即重启应用？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._restart_for_update()
+            return
+
+        self.status_bar.showMessage("更新已就绪，请稍后手动重启应用以生效")
+        QMessageBox.information(
+            self,
+            "需要重启",
+            "更新文件已准备完成。\n请退出并重新打开应用，新版本才会生效。",
+        )
+
+    def _restart_for_update(self) -> None:
+        result = self._pending_restart_result
+        if result is None:
+            return
+
+        self.status_bar.showMessage("正在重启应用...")
+        try:
+            apply_pending_restart(result, wait_pid=os.getpid())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "重启失败", str(exc))
+            return
+
+        QApplication.instance().quit()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

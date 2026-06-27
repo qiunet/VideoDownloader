@@ -47,8 +47,8 @@ git push origin v1.0.0
 ```
 
 会在 Actions 页面生成产物：
-- `VideoDownload-macOS`：`VideoDownload.dmg` + `VideoDownload.app`
-- `VideoDownload-Windows`：`VideoDownload.exe`
+- `VideoDownload-macOS`：`VideoDownload.dmg` + `VideoDownload.app.zip`
+- `VideoDownload-Windows`：`VideoDownload-Windows.zip`（解压后为 `VideoDownload` 文件夹，内含主程序与更新器）
 
 推送 `v*` 标签时还会自动创建 GitHub Release 并上传安装包。
 
@@ -71,7 +71,9 @@ chmod +x scripts/build_mac.sh
 scripts\build_win.bat
 ```
 
-产物位于 `dist\VideoDownload.exe`。
+产物位于 `dist\VideoDownload\` 和 `dist\VideoDownload-Windows.zip`。
+
+解压 zip 后运行 `VideoDownload\VideoDownload.exe` 即可。
 
 ## 依赖
 

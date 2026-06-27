@@ -30,14 +30,25 @@ jobs:
       - name: Download ffmpeg
         run: python scripts/download_ffmpeg.py
 
+      - name: Build updater
+        run: pyinstaller --clean --noconfirm Updater.spec
+
       - name: Build app
         run: pyinstaller --clean --noconfirm VideoDownload.spec
+
+      - name: Bundle updater into app
+        run: cp dist/VideoDownloadUpdater dist/VideoDownload.app/Contents/MacOS/
 
       - name: Create DMG
         run: |
           hdiutil create -volname "VideoDownload" \
             -srcfolder dist/VideoDownload.app \
             -ov -format UDZO dist/VideoDownload.dmg
+
+      - name: Create app zip for updater
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent VideoDownload.app VideoDownload.app.zip
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -46,6 +57,7 @@ jobs:
           path: |
             dist/VideoDownload.dmg
             dist/VideoDownload.app
+            dist/VideoDownload.app.zip
           if-no-files-found: error
 
   build-windows:
@@ -68,14 +80,27 @@ jobs:
       - name: Download ffmpeg
         run: python scripts/download_ffmpeg.py
 
+      - name: Build updater
+        run: pyinstaller --clean --noconfirm Updater.spec
+
       - name: Build exe
         run: pyinstaller --clean --noconfirm VideoDownload.spec
+
+      - name: Package Windows folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/VideoDownload | Out-Null
+          Move-Item -Force dist/VideoDownload.exe dist/VideoDownload/
+          Move-Item -Force dist/VideoDownloadUpdater.exe dist/VideoDownload/
+          Compress-Archive -Path dist/VideoDownload -DestinationPath dist/VideoDownload-Windows.zip -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: VideoDownload-Windows
-          path: dist/VideoDownload.exe
+          path: |
+            dist/VideoDownload
+            dist/VideoDownload-Windows.zip
           if-no-files-found: error
 
   release:
@@ -103,7 +128,8 @@ jobs:
         with:
           files: |
             release/macos/VideoDownload.dmg
-            release/windows/VideoDownload.exe
+            release/macos/VideoDownload.app.zip
+            release/windows/VideoDownload-Windows.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
