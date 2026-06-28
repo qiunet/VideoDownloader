@@ -26,6 +26,12 @@ from updater import (
     format_update_summary,
     is_frozen,
 )
+from douyin_adapter import (
+    is_douyin_format,
+    is_douyin_url,
+    probe_url as probe_douyin_url,
+    download as download_douyin,
+)
 from version import APP_VERSION
 
 import yt_dlp
@@ -164,6 +170,8 @@ def has_ffmpeg() -> bool:
 
 
 def format_needs_merge(format_selector: str) -> bool:
+    if is_douyin_format(format_selector):
+        return False
     return "+" in format_selector or format_selector.startswith(("bv", "bestvideo"))
 
 
@@ -310,6 +318,9 @@ class FormatFetcher:
 
     def _run(self, url: str) -> None:
         try:
+            if is_douyin_url(url):
+                self._run_douyin(url)
+                return
             with yt_dlp.YoutubeDL(build_ydl_opts(url)) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not info:
@@ -331,6 +342,28 @@ class FormatFetcher:
                 return
             self._on_done(
                 FormatFetchResult(ok=True, url=url, title=title, formats=formats)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_done(FormatFetchResult(ok=False, url=url, error=str(exc)))
+
+    def _run_douyin(self, url: str) -> None:
+        try:
+            result = probe_douyin_url(url)
+            formats = [
+                FormatOption(f.format_selector, f.quality) for f in result.formats
+            ]
+            if not formats:
+                self._on_done(
+                    FormatFetchResult(ok=False, url=url, error="未找到可下载的清晰度")
+                )
+                return
+            self._on_done(
+                FormatFetchResult(
+                    ok=True,
+                    url=url,
+                    title=result.title,
+                    formats=formats,
+                )
             )
         except Exception as exc:  # noqa: BLE001
             self._on_done(FormatFetchResult(ok=False, url=url, error=str(exc)))
@@ -403,26 +436,29 @@ class DownloadManager:
                     t.progress = "100%"
                 self._notify(t)
 
-        ydl_opts: dict = {
-            **build_ydl_opts(url),
-            "format": format_selector,
-            "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
-            "progress_hooks": [progress_hook],
-        }
-
-        ffmpeg = find_ffmpeg()
-        if ffmpeg:
-            ydl_opts["ffmpeg_location"] = ffmpeg
-            ydl_opts["merge_output_format"] = "mp4"
-
         try:
             with self._lock:
                 task.status = "下载中"
                 task.progress = "0%"
                 self._notify(task)
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            if is_douyin_format(format_selector):
+                download_douyin(url, output_dir, format_selector, progress_hook)
+            else:
+                ydl_opts: dict = {
+                    **build_ydl_opts(url),
+                    "format": format_selector,
+                    "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
+                    "progress_hooks": [progress_hook],
+                }
+
+                ffmpeg = find_ffmpeg()
+                if ffmpeg:
+                    ydl_opts["ffmpeg_location"] = ffmpeg
+                    ydl_opts["merge_output_format"] = "mp4"
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
 
             with self._lock:
                 task.status = "完成"

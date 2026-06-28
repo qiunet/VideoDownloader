@@ -7,3 +7,4 @@ __pycache__/
 *.spec.bak
 assets/icon.iconset/
 .DS_Store
+logs/
