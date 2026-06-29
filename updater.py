@@ -337,9 +337,10 @@ def _spawn_updater(args: list[str]) -> None:
 
     command = [str(updater), *args]
     if sys.platform == "win32":
+        workdir = os.environ.get("TEMP") or os.environ.get("TMP") or str(updater.parent)
         subprocess.Popen(
             command,
-            cwd=str(updater.parent),
+            cwd=workdir,
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             close_fds=True,
         )
@@ -428,9 +429,9 @@ def perform_update(
         if not is_frozen():
             return UpdateResult.failure("开发模式请下载 Release 安装包更新应用")
         if sys.platform == "win32":
-            app_package = download_dir / "VideoDownload-Windows.zip.new"
+            app_package = download_dir / "VideoDownload-Windows.zip"
         else:
-            app_package = download_dir / "VideoDownload.app.zip.new"
+            app_package = download_dir / "VideoDownload.app.zip"
         download_app_package(app_package, on_progress=on_progress)
         updated = True
 

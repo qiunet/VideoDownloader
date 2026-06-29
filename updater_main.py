@@ -17,6 +17,10 @@ from pathlib import Path
 WINDOWS_APP_EXE = "VideoDownload.exe"
 
 
+def is_zip_package(path: Path) -> bool:
+    return path.is_file() and zipfile.is_zipfile(path)
+
+
 def wait_for_pid(pid: int, timeout: float = 120.0) -> bool:
     if pid <= 0:
         return True
@@ -40,6 +44,11 @@ def remove_path(path: Path) -> None:
 
 
 def replace_file(source: Path, target: Path) -> None:
+    if target.is_dir():
+        raise RuntimeError(
+            f"不支持将单个文件替换到目录: {target}。"
+            " Windows 应用更新应使用 zip 包。"
+        )
     backup = target.with_name(target.name + ".old")
     remove_path(backup)
     if target.exists():
@@ -72,19 +81,37 @@ def find_windows_package_root(tmp_path: Path) -> Path:
     return matches[0].parent
 
 
+def copy_item_with_retry(source: Path, dest: Path, *, retries: int = 20) -> None:
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    backup = dest.with_name(dest.name + ".old")
+                    remove_path(backup)
+                    dest.rename(backup)
+            if source.is_dir():
+                shutil.copytree(source, dest)
+            else:
+                shutil.copy2(source, dest)
+            remove_path(dest.with_name(dest.name + ".old"))
+            return
+        except (PermissionError, OSError) as exc:
+            last_error = exc
+            time.sleep(0.5 + attempt * 0.1)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"无法写入: {dest}")
+
+
 def replace_windows_folder(source_zip: Path, target_dir: Path) -> None:
     with extract_zip(source_zip) as tmp_path:
         source_folder = find_windows_package_root(tmp_path)
         target_dir.mkdir(parents=True, exist_ok=True)
         for item in source_folder.iterdir():
-            dest = target_dir / item.name
-            if item.is_dir():
-                remove_path(dest)
-                shutil.copytree(item, dest)
-            else:
-                if dest.exists():
-                    dest.unlink()
-                shutil.copy2(item, dest)
+            copy_item_with_retry(item, target_dir / item.name)
 
 
 def replace_mac_app(source_zip: Path, target_app: Path) -> None:
@@ -128,6 +155,10 @@ def main() -> int:
         print("等待主程序退出超时", file=sys.stderr)
         return 1
 
+    if sys.platform == "win32" and args.wait_pid > 0:
+        # 主进程退出后，Windows 仍可能短暂占用 exe/工作目录
+        time.sleep(1.5)
+
     if not args.restart_only:
         if not args.source:
             print("缺少 --source", file=sys.stderr)
@@ -137,9 +168,9 @@ def main() -> int:
             print(f"更新文件不存在: {source}", file=sys.stderr)
             return 1
 
-        if sys.platform == "win32" and source.suffix == ".zip":
+        if sys.platform == "win32" and is_zip_package(source):
             replace_windows_folder(source, target)
-        elif sys.platform == "darwin" and target.suffix == ".app":
+        elif sys.platform == "darwin" and target.suffix == ".app" and is_zip_package(source):
             replace_mac_app(source, target)
         else:
             replace_file(source, target)
