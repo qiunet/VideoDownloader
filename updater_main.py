@@ -107,11 +107,20 @@ def copy_item_with_retry(source: Path, dest: Path, *, retries: int = 20) -> None
 
 
 def replace_windows_folder(source_zip: Path, target_dir: Path) -> None:
+    running_exe = Path(sys.executable).resolve()
     with extract_zip(source_zip) as tmp_path:
         source_folder = find_windows_package_root(tmp_path)
         target_dir.mkdir(parents=True, exist_ok=True)
         for item in source_folder.iterdir():
-            copy_item_with_retry(item, target_dir / item.name)
+            dest = target_dir / item.name
+            if item.is_file():
+                try:
+                    if dest.resolve() == running_exe:
+                        _log(f"跳过正在运行的更新器: {dest}")
+                        continue
+                except OSError:
+                    pass
+            copy_item_with_retry(item, dest)
 
 
 def replace_mac_app(source_zip: Path, target_app: Path) -> None:
@@ -124,17 +133,44 @@ def replace_mac_app(source_zip: Path, target_app: Path) -> None:
     remove_path(backup)
 
 
+def _log(message: str) -> None:
+    print(message, flush=True)
+    try:
+        from bootstrap import user_data_dir
+
+        log_dir = user_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "updater-latest.log"
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+
 def launch_target(target: Path) -> None:
     if target.is_dir():
         exe = target / WINDOWS_APP_EXE
         if not exe.is_file():
             raise RuntimeError(f"目录中未找到 {WINDOWS_APP_EXE}: {target}")
-        subprocess.Popen([str(exe)], cwd=str(target), close_fds=True)
-        return
-    if sys.platform == "darwin" and target.suffix == ".app":
+    elif target.suffix.lower() == ".exe":
+        exe = target
+    elif sys.platform == "darwin" and target.suffix == ".app":
+        _log(f"启动 macOS 应用: {target}")
         subprocess.Popen(["open", "-n", str(target)], close_fds=True)
         return
-    subprocess.Popen([str(target)], cwd=str(target.parent), close_fds=True)
+    else:
+        raise RuntimeError(f"无法识别的启动目标: {target}")
+
+    _log(f"启动应用: {exe}")
+    if sys.platform == "win32":
+        subprocess.Popen(
+            [str(exe)],
+            cwd=str(exe.parent),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        return
+    subprocess.Popen([str(exe)], cwd=str(exe.parent), start_new_session=True, close_fds=True)
 
 
 def main() -> int:
@@ -150,8 +186,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    _log(f"updater 启动 argv={' '.join(sys.argv[1:])}")
+
+    try:
+        return _run(args)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"updater 失败: {exc}")
+        raise
+
+
+def _run(args: argparse.Namespace) -> int:
     target = Path(args.target)
     if not wait_for_pid(args.wait_pid):
+        _log(f"等待主程序退出超时 pid={args.wait_pid}")
         print("等待主程序退出超时", file=sys.stderr)
         return 1
 
@@ -165,18 +212,22 @@ def main() -> int:
             return 1
         source = Path(args.source)
         if not source.is_file():
+            _log(f"更新文件不存在: {source}")
             print(f"更新文件不存在: {source}", file=sys.stderr)
             return 1
 
+        _log(f"开始替换 target={target} source={source}")
         if sys.platform == "win32" and is_zip_package(source):
             replace_windows_folder(source, target)
         elif sys.platform == "darwin" and target.suffix == ".app" and is_zip_package(source):
             replace_mac_app(source, target)
         else:
             replace_file(source, target)
+        _log("文件替换完成")
 
     if args.restart or args.restart_only:
         launch_target(target)
+        _log("已请求启动应用")
     return 0
 
 

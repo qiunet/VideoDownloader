@@ -316,9 +316,16 @@ def _spawn_updater(args: list[str]) -> None:
     if not updater.is_file():
         raise RuntimeError(f"未找到更新器: {updater.name}")
 
-    command = [str(updater), *args]
     if sys.platform == "win32":
-        workdir = os.environ.get("TEMP") or os.environ.get("TMP") or str(updater.parent)
+        staged = user_data_dir() / "VideoDownloadUpdater.exe"
+        shutil.copy2(updater, staged)
+        command = [str(staged), *args]
+        workdir = os.environ.get("TEMP") or os.environ.get("TMP") or str(staged.parent)
+    else:
+        command = [str(updater), *args]
+        workdir = str(updater.parent)
+
+    if sys.platform == "win32":
         subprocess.Popen(
             command,
             cwd=workdir,
@@ -326,7 +333,7 @@ def _spawn_updater(args: list[str]) -> None:
             close_fds=True,
         )
     else:
-        subprocess.Popen(command, cwd=str(updater.parent), start_new_session=True)
+        subprocess.Popen(command, cwd=workdir, start_new_session=True)
 
 
 def replace_app_via_updater(source: Path, *, wait_pid: int, restart: bool = True) -> None:
