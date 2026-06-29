@@ -25,6 +25,8 @@ ProgressCallback = Callable[[str, float | None], None]
 
 USER_AGENT = f"VideoDownload/{APP_VERSION}"
 CHECK_CACHE_TTL = 3600  # 秒，避免频繁请求
+_check_cache: tuple[float, VersionInfo] | None = None
+_check_cache_lock = threading.Lock()
 YTDLP_VERSION_RE = re.compile(r"__version__\s*=\s*['\"]([^'\"]+)['\"]")
 RELEASE_TAG_RE = re.compile(r"/releases/tag/v?([^/?#]+)", re.I)
 APP_ASSET_NAMES = {
@@ -129,43 +131,22 @@ def get_current_ytdlp_version() -> str:
     return yt_dlp.version.__version__
 
 
-def _check_cache_path() -> Path:
-    return user_data_dir() / "update_check_cache.json"
-
-
 def _load_check_cache() -> VersionInfo | None:
-    path = _check_cache_path()
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if time.time() - float(data.get("ts", 0)) > CHECK_CACHE_TTL:
+    global _check_cache
+    with _check_cache_lock:
+        if _check_cache is None:
             return None
-        return VersionInfo(
-            app_current=data["app_current"],
-            app_latest=data["app_latest"],
-            ytdlp_current=data["ytdlp_current"],
-            ytdlp_latest=data["ytdlp_latest"],
-            app_update_available=data["app_update_available"],
-            ytdlp_update_available=data["ytdlp_update_available"],
-        )
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return None
+        cached_at, info = _check_cache
+        if time.time() - cached_at > CHECK_CACHE_TTL:
+            _check_cache = None
+            return None
+        return info
 
 
 def _save_check_cache(info: VersionInfo) -> None:
-    path = _check_cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "ts": time.time(),
-        "app_current": info.app_current,
-        "app_latest": info.app_latest,
-        "ytdlp_current": info.ytdlp_current,
-        "ytdlp_latest": info.ytdlp_latest,
-        "app_update_available": info.app_update_available,
-        "ytdlp_update_available": info.ytdlp_update_available,
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    global _check_cache
+    with _check_cache_lock:
+        _check_cache = (time.time(), info)
 
 
 def _request_headers(*, accept: str | None = None) -> dict[str, str]:

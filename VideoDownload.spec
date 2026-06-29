@@ -35,6 +35,7 @@ a = Analysis(
         'version',
         'bootstrap',
         'updater',
+        'app_log',
     ],
     hookspath=[hooks_dir],
     hooksconfig={},

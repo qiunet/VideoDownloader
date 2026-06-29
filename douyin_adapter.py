@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,13 +15,22 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from app_log import log_file_hint, setup_app_logging
+
 DOUYIN_FORMAT_PREFIX = "douyin:"
 DEFAULT_COOKIE_BROWSER = "chrome"
 COOKIE_TTL_SECONDS = 300
 
 _COOKIE_CACHE: tuple[float, str] | None = None
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("douyin_adapter")
+
+_BROWSER_USER_DATA: dict[str, list[str]] = {
+    "chrome": ["Google/Chrome/User Data"],
+    "edge": ["Microsoft/Edge/User Data"],
+    "chromium": ["Chromium/User Data"],
+    "brave": ["BraveSoftware/Brave-Browser/User Data"],
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +48,7 @@ class DouyinProbeResult:
 
 def _load_f2() -> dict[str, Any]:
     """延迟加载 f2，避免启动时读取配置；打包版需包含 f2/conf 资源。"""
+    setup_app_logging()
     import f2
     from f2.apps.douyin.handler import DouyinHandler
     from f2.apps.douyin.utils import AwemeIdFetcher, ClientConfManager
@@ -103,6 +115,151 @@ async def _resolve_aweme_id(url: str) -> str:
     return await f2["AwemeIdFetcher"].get_aweme_id(url)
 
 
+def _browser_candidates() -> list[str]:
+    if sys.platform == "win32":
+        return ["chrome", "edge", "chromium", "brave", "firefox"]
+    if sys.platform == "darwin":
+        return ["chrome", "safari", "edge", "chromium", "brave", "firefox"]
+    return ["chrome", "chromium", "edge", "brave", "firefox"]
+
+
+def _firefox_profile_roots() -> list[Path]:
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        return [Path(appdata) / "Mozilla/Firefox/Profiles"] if appdata else []
+    if sys.platform == "darwin":
+        return [Path.home() / "Library/Application Support/Firefox/Profiles"]
+    return [Path.home() / ".mozilla/firefox"]
+
+
+def _iter_browser_cookie_files(browser: str) -> list[Path]:
+    cookie_files: list[Path] = []
+
+    if browser == "firefox":
+        for profiles_root in _firefox_profile_roots():
+            if not profiles_root.is_dir():
+                continue
+            for profile_dir in sorted(profiles_root.iterdir()):
+                if not profile_dir.is_dir():
+                    continue
+                cookie_db = profile_dir / "cookies.sqlite"
+                if cookie_db.is_file():
+                    cookie_files.append(cookie_db)
+        return cookie_files
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if not local_app_data:
+        return cookie_files
+
+    rel_paths = _BROWSER_USER_DATA.get(browser, [])
+    for rel in rel_paths:
+        user_data = Path(local_app_data) / rel
+        if not user_data.is_dir():
+            continue
+        for profile_dir in sorted(user_data.iterdir()):
+            if not profile_dir.is_dir():
+                continue
+            for name in ("Network/Cookies", "Cookies"):
+                cookie_file = profile_dir / name
+                if cookie_file.is_file():
+                    cookie_files.append(cookie_file)
+    return cookie_files
+
+
+def _domain_matches(cookie_domain: str, domain: str) -> bool:
+    left = cookie_domain.lstrip(".").lower()
+    right = domain.lstrip(".").lower()
+    return left == right or left.endswith("." + right) or right.endswith("." + left)
+
+
+def _cookies_from_jar(jar: Any, domain: str) -> dict[str, str]:
+    return {
+        cookie.name: cookie.value
+        for cookie in jar
+        if _domain_matches(cookie.domain, domain)
+    }
+
+
+def _read_browser_cookies(browser: str, domain: str) -> dict[str, str]:
+    import browser_cookie3
+
+    readers = {
+        "chrome": browser_cookie3.chrome,
+        "edge": browser_cookie3.edge,
+        "chromium": browser_cookie3.chromium,
+        "brave": browser_cookie3.brave,
+        "firefox": browser_cookie3.firefox,
+        "safari": browser_cookie3.safari,
+        "opera": browser_cookie3.opera,
+        "vivaldi": browser_cookie3.vivaldi,
+    }
+    reader = readers.get(browser)
+    if reader is None:
+        logger.warning("不支持的浏览器: %s", browser)
+        return {}
+
+    try:
+        cookies = _cookies_from_jar(reader(domain_name=domain), domain)
+        if cookies:
+            logger.info("从 %s 默认配置读取到 %d 个 %s Cookie", browser, len(cookies), domain)
+            return cookies
+        logger.warning("%s 默认配置中未找到 %s Cookie", browser, domain)
+    except PermissionError:
+        logger.exception("读取 %s Cookie 权限不足（请完全退出该浏览器）", browser)
+    except Exception:
+        logger.exception("读取 %s 默认 Cookie 失败", browser)
+
+    for cookie_file in _iter_browser_cookie_files(browser):
+        try:
+            cookies = _cookies_from_jar(
+                reader(cookie_file=str(cookie_file), domain_name=domain),
+                domain,
+            )
+            if cookies:
+                profile = (
+                    cookie_file.parent.name
+                    if browser == "firefox"
+                    else cookie_file.parent.parent.name
+                )
+                logger.info(
+                    "从 %s/%s 读取到 %d 个 %s Cookie",
+                    browser,
+                    profile,
+                    len(cookies),
+                    domain,
+                )
+                return cookies
+        except PermissionError:
+            logger.exception("读取 %s Cookie 文件被占用: %s", browser, cookie_file)
+        except Exception:
+            logger.exception("读取 %s Cookie 文件失败: %s", browser, cookie_file)
+
+    return {}
+
+
+def _cookie_error_message(errors: list[str]) -> str:
+    lines = [
+        "无法读取浏览器 Cookie，抖音解析需要先在浏览器中打开 douyin.com。",
+    ]
+    if sys.platform == "win32":
+        lines.extend(
+            [
+                "",
+                "Windows 建议：",
+                "1. 完全退出 Chrome / Edge（任务管理器中确认无 chrome.exe / msedge.exe）",
+                "2. 先在浏览器访问 https://www.douyin.com 后再重试",
+                "3. 若 Chrome / Edge 仍失败，可在 Firefox 打开 douyin.com 后重试（Firefox 排在最后尝试）",
+            ]
+        )
+    else:
+        lines.append("请完全退出对应浏览器后重试。")
+
+    if errors:
+        lines.extend(["", "尝试记录：", *errors[:6]])
+    lines.append(log_file_hint())
+    return "\n".join(lines)
+
+
 def _get_cookie(browser: str = DEFAULT_COOKIE_BROWSER) -> str:
     global _COOKIE_CACHE
     now = time.time()
@@ -110,27 +267,28 @@ def _get_cookie(browser: str = DEFAULT_COOKIE_BROWSER) -> str:
         return _COOKIE_CACHE[1]
 
     f2 = _load_f2()
-    get_cookie_from_browser = f2["get_cookie_from_browser"]
     split_dict_cookie = f2["split_dict_cookie"]
 
-    try:
-        cookie = split_dict_cookie(get_cookie_from_browser(browser, "douyin.com"))
-    except PermissionError as exc:
-        raise RuntimeError(
-            "无法读取浏览器 Cookie，请关闭 Chrome 后重试，或检查系统权限。"
-        ) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"无法从 {browser} 读取 douyin.com Cookie：{exc}"
-        ) from exc
+    browsers = [browser] if browser else []
+    for candidate in _browser_candidates():
+        if candidate not in browsers:
+            browsers.append(candidate)
 
-    if not cookie:
-        raise RuntimeError(
-            f"未从 {browser} 获取到 douyin.com Cookie，请先在浏览器中打开抖音。"
-        )
+    errors: list[str] = []
+    for name in browsers:
+        raw = _read_browser_cookies(name, "douyin.com")
+        if not raw:
+            errors.append(f"{name}: 未找到 douyin.com Cookie")
+            continue
+        cookie = split_dict_cookie(raw)
+        if not cookie:
+            errors.append(f"{name}: Cookie 为空")
+            continue
+        _COOKIE_CACHE = (now, cookie)
+        return cookie
 
-    _COOKIE_CACHE = (now, cookie)
-    return cookie
+    logger.error("所有浏览器 Cookie 读取失败: %s", "; ".join(errors))
+    raise RuntimeError(_cookie_error_message(errors))
 
 
 def _build_handler_kwargs(url: str, cookie: str) -> dict:

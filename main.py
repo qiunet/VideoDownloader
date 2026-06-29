@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from app_log import setup_app_logging
 from updater import (
     UpdateResult,
     UpdateWorker,
@@ -935,6 +936,7 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    setup_app_logging()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     window = MainWindow()
