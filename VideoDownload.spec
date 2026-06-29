@@ -7,6 +7,7 @@ block_cipher = None
 project_root = Path(SPECPATH)
 icon_ico = str(project_root / 'assets' / 'icon.ico')
 icon_icns = str(project_root / 'assets' / 'icon.icns')
+hooks_dir = str(project_root / 'hooks')
 
 ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
 ffmpeg_path = project_root / 'bin' / ffmpeg_name
@@ -23,6 +24,10 @@ a = Analysis(
         'yt_dlp',
         'f2',
         'douyin_adapter',
+        'browser_cookie3',
+        'httpx',
+        'rich',
+        'yaml',
         'PyQt6',
         'PyQt6.QtCore',
         'PyQt6.QtGui',
@@ -31,7 +36,7 @@ a = Analysis(
         'bootstrap',
         'updater',
     ],
-    hookspath=[],
+    hookspath=[hooks_dir],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

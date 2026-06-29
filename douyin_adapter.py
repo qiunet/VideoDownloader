@@ -8,17 +8,10 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-
-import f2
-from f2.apps.douyin.handler import DouyinHandler
-from f2.apps.douyin.utils import AwemeIdFetcher, ClientConfManager
-from f2.exceptions.api_exceptions import APIResponseError
-from f2.utils.conf_manager import ConfigManager
-from f2.utils.utils import get_cookie_from_browser, merge_config, split_dict_cookie
 
 DOUYIN_FORMAT_PREFIX = "douyin:"
 DEFAULT_COOKIE_BROWSER = "chrome"
@@ -40,6 +33,28 @@ class DouyinProbeResult:
     title: str
     formats: list[DouyinFormat]
     aweme_id: str
+
+
+def _load_f2() -> dict[str, Any]:
+    """延迟加载 f2，避免启动时读取配置；打包版需包含 f2/conf 资源。"""
+    import f2
+    from f2.apps.douyin.handler import DouyinHandler
+    from f2.apps.douyin.utils import AwemeIdFetcher, ClientConfManager
+    from f2.exceptions.api_exceptions import APIResponseError
+    from f2.utils.conf_manager import ConfigManager
+    from f2.utils.utils import get_cookie_from_browser, merge_config, split_dict_cookie
+
+    return {
+        "f2": f2,
+        "DouyinHandler": DouyinHandler,
+        "AwemeIdFetcher": AwemeIdFetcher,
+        "ClientConfManager": ClientConfManager,
+        "APIResponseError": APIResponseError,
+        "ConfigManager": ConfigManager,
+        "get_cookie_from_browser": get_cookie_from_browser,
+        "merge_config": merge_config,
+        "split_dict_cookie": split_dict_cookie,
+    }
 
 
 def is_douyin_url(url: str) -> bool:
@@ -84,7 +99,8 @@ async def _resolve_aweme_id(url: str) -> str:
     aweme_id = _extract_aweme_id_from_url(url)
     if aweme_id:
         return aweme_id
-    return await AwemeIdFetcher.get_aweme_id(url)
+    f2 = _load_f2()
+    return await f2["AwemeIdFetcher"].get_aweme_id(url)
 
 
 def _get_cookie(browser: str = DEFAULT_COOKIE_BROWSER) -> str:
@@ -92,6 +108,10 @@ def _get_cookie(browser: str = DEFAULT_COOKIE_BROWSER) -> str:
     now = time.time()
     if _COOKIE_CACHE and now - _COOKIE_CACHE[0] < COOKIE_TTL_SECONDS:
         return _COOKIE_CACHE[1]
+
+    f2 = _load_f2()
+    get_cookie_from_browser = f2["get_cookie_from_browser"]
+    split_dict_cookie = f2["split_dict_cookie"]
 
     try:
         cookie = split_dict_cookie(get_cookie_from_browser(browser, "douyin.com"))
@@ -114,13 +134,14 @@ def _get_cookie(browser: str = DEFAULT_COOKIE_BROWSER) -> str:
 
 
 def _build_handler_kwargs(url: str, cookie: str) -> dict:
-    main_manager = ConfigManager(f2.APP_CONFIG_FILE_PATH)
+    f2 = _load_f2()
+    main_manager = f2["ConfigManager"](f2["f2"].APP_CONFIG_FILE_PATH)
     main_conf = main_manager.get_config("douyin")
-    main_conf["proxies"] = ClientConfManager.proxies()
-    kwargs = merge_config(main_conf, main_conf, url=url, mode="one", cookie=cookie)
+    main_conf["proxies"] = f2["ClientConfManager"].proxies()
+    kwargs = f2["merge_config"](main_conf, main_conf, url=url, mode="one", cookie=cookie)
     kwargs.setdefault("headers", {})
-    kwargs["headers"]["User-Agent"] = ClientConfManager.user_agent()
-    kwargs["headers"]["Referer"] = ClientConfManager.referer()
+    kwargs["headers"]["User-Agent"] = f2["ClientConfManager"].user_agent()
+    kwargs["headers"]["Referer"] = f2["ClientConfManager"].referer()
     return kwargs
 
 
@@ -180,13 +201,14 @@ def _build_formats(raw: dict, aweme_data: dict) -> list[DouyinFormat]:
 
 
 async def _fetch_probe(url: str) -> DouyinProbeResult:
+    f2 = _load_f2()
     cookie = _get_cookie()
     aweme_id = await _resolve_aweme_id(url)
     kwargs = _build_handler_kwargs(url, cookie)
-    handler = DouyinHandler(kwargs)
+    handler = f2["DouyinHandler"](kwargs)
     try:
         video = await handler.fetch_one_video(aweme_id)
-    except APIResponseError as exc:
+    except f2["APIResponseError"] as exc:
         raise RuntimeError(str(exc)) from exc
 
     aweme_data = video._to_dict()
@@ -200,10 +222,11 @@ async def _fetch_download_target(
     url: str,
     format_selector: str,
 ) -> tuple[str, str, dict]:
+    f2 = _load_f2()
     cookie = _get_cookie()
     aweme_id = await _resolve_aweme_id(url)
     kwargs = _build_handler_kwargs(url, cookie)
-    handler = DouyinHandler(kwargs)
+    handler = f2["DouyinHandler"](kwargs)
     video = await handler.fetch_one_video(aweme_id)
     aweme_data = video._to_dict()
     raw = video._to_raw()
@@ -246,8 +269,7 @@ def _download_stream(
     progress_hook: Callable[[dict], None],
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    last_tick = started
+    last_tick = time.monotonic()
     last_downloaded = 0
 
     with httpx.Client(follow_redirects=True, timeout=120.0, headers=headers) as client:

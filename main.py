@@ -26,12 +26,6 @@ from updater import (
     format_update_summary,
     is_frozen,
 )
-from douyin_adapter import (
-    is_douyin_format,
-    is_douyin_url,
-    probe_url as probe_douyin_url,
-    download as download_douyin,
-)
 from version import APP_VERSION
 
 import yt_dlp
@@ -170,6 +164,8 @@ def has_ffmpeg() -> bool:
 
 
 def format_needs_merge(format_selector: str) -> bool:
+    from douyin_adapter import is_douyin_format
+
     if is_douyin_format(format_selector):
         return False
     return "+" in format_selector or format_selector.startswith(("bv", "bestvideo"))
@@ -318,6 +314,8 @@ class FormatFetcher:
 
     def _run(self, url: str) -> None:
         try:
+            from douyin_adapter import is_douyin_url, probe_url as probe_douyin_url
+
             if is_douyin_url(url):
                 self._run_douyin(url)
                 return
@@ -347,6 +345,8 @@ class FormatFetcher:
             self._on_done(FormatFetchResult(ok=False, url=url, error=str(exc)))
 
     def _run_douyin(self, url: str) -> None:
+        from douyin_adapter import probe_url as probe_douyin_url
+
         try:
             result = probe_douyin_url(url)
             formats = [
@@ -442,7 +442,11 @@ class DownloadManager:
                 task.progress = "0%"
                 self._notify(task)
 
+            from douyin_adapter import is_douyin_format
+
             if is_douyin_format(format_selector):
+                from douyin_adapter import download as download_douyin
+
                 download_douyin(url, output_dir, format_selector, progress_hook)
             else:
                 ydl_opts: dict = {
